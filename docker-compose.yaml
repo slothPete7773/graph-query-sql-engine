@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  gremlin-server:
+    image: tinkerpop/gremlin-server:latest
+    container_name: gremlin-server
+    ports:
+      - "8182:8182"
+    volumes:
+      - gremlin-data:/opt/gremlin-server/data
+    environment:
+      - JAVA_OPTIONS=-Xms512m -Xmx512m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8182/?gremlin=100-1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  gremlin-data:
+    driver: local
