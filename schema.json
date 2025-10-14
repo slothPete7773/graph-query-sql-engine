@@ -1,0 +1,153 @@
+{
+  "graph": {
+    "vertices": [
+      {
+        "label": "customer",
+        "oneToOne": {
+          "tableSource": {
+            "catalog": "customer_domain",
+            "schema": "customer_domain",
+            "table": "customer"
+          },
+          "id": {
+            "fields": [
+              {
+                "type": "STRING",
+                "field": "customer_id",
+                "alias": "puppy_id_customer_id"
+              }
+            ]
+          },
+          "attributes": [
+            {
+              "type": "STRING",
+              "field": "customer_id",
+              "alias": "customer_id"
+            },
+            {
+              "type": "STRING",
+              "field": "first_name",
+              "alias": "first_name"
+            }
+          ]
+        }
+      },
+      {
+        "label": "transaction",
+        "oneToOne": {
+          "tableSource": {
+            "catalog": "customer_domain",
+            "schema": "customer_domain",
+            "table": "customer_transaction"
+          },
+          "id": {
+            "fields": [
+              {
+                "type": "STRING",
+                "field": "transaction_id",
+                "alias": "puppy_id_transaction_id"
+              }
+            ]
+          },
+          "attributes": [
+            {
+              "type": "STRING",
+              "field": "transaction_id",
+              "alias": "transaction_id"
+            }
+          ]
+        }
+      }
+    ],
+    "edges": [
+      {
+        "label": "lives_at",
+        "fromVertex": "customer",
+        "toVertex": "address",
+        "tableSource": {
+          "catalog": "customer_domain",
+          "schema": "customer_domain",
+          "table": "customer_address"
+        },
+        "id": {
+          "fields": [
+            {
+              "type": "STRING",
+              "field": "address_id",
+              "alias": "puppy_id_address_id"
+            }
+          ]
+        },
+        "fromId": {
+          "fields": [
+            {
+              "type": "STRING",
+              "field": "customer_id",
+              "alias": "puppy_from_customer_id"
+            }
+          ]
+        },
+        "toId": {
+          "fields": [
+            {
+              "type": "STRING",
+              "field": "address_id",
+              "alias": "puppy_to_address_id"
+            }
+          ]
+        },
+        "attributes": [
+          {
+            "type": "STRING",
+            "field": "address_id",
+            "alias": "address_id"
+          }
+        ]
+      },
+      {
+        "label": "creates",
+        "fromVertex": "customer",
+        "toVertex": "transaction",
+        "tableSource": {
+          "catalog": "customer_domain",
+          "schema": "customer_domain",
+          "table": "customer_transaction"
+        },
+        "id": {
+          "fields": [
+            {
+              "type": "STRING",
+              "field": "transaction_id",
+              "alias": "puppy_id_transaction_id"
+            }
+          ]
+        },
+        "fromId": {
+          "fields": [
+            {
+              "type": "STRING",
+              "field": "customer_id",
+              "alias": "puppy_from_customer_id"
+            }
+          ]
+        },
+        "toId": {
+          "fields": [
+            {
+              "type": "STRING",
+              "field": "transaction_id",
+              "alias": "puppy_to_transaction_id"
+            }
+          ]
+        },
+        "attributes": [
+          {
+            "type": "STRING",
+            "field": "transaction_id",
+            "alias": "transaction_id"
+          }
+        ]
+      }
+    ]
+  }
+}

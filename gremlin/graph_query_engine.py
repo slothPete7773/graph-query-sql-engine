@@ -148,7 +148,16 @@ class SQLGeneratorVisitor(GremlinVisitor):
     def visit_V(self, node: ASTNode):
         """Handle V() - start at vertices"""
         label = self._get_vertex_label_from_context(node)
-        table_name = self.graph_schema["vertex_tables"].get(label, "vertices")
+        vertex_config = self._get_vertex_config(label)
+
+        if vertex_config:
+            table_source = vertex_config["oneToOne"]["tableSource"]
+            table_name = f"{table_source['catalog']}.{table_source['schema']}.{table_source['table']}"
+            id_field = vertex_config["oneToOne"]["id"]["fields"][0]["field"]
+        else:
+            # Fallback to default
+            table_name = "vertices"
+            id_field = "id"
 
         alias = f"v{self.table_counter}"
         self.table_counter += 1
@@ -160,7 +169,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
         if node.args and node.args[0]:
             ids = node.args[0] if isinstance(node.args[0], list) else [node.args[0]]
             id_list = ", ".join(f"'{id}'" for id in ids)
-            self.where_clauses.append(f"{alias}.id IN ({id_list})")
+            self.where_clauses.append(f"{alias}.{id_field} IN ({id_list})")
 
     def visit_has(self, node: ASTNode):
         """Handle has() - filter vertices/edges by property"""
@@ -198,10 +207,34 @@ class SQLGeneratorVisitor(GremlinVisitor):
         """Handle out() - traverse outgoing edges"""
         edge_label = node.args[0]
 
-        # Get edge table and target vertex table from schema
-        edge_info = self.graph_schema["edges"].get(edge_label, {})
-        edge_table = edge_info.get("table", "edges")
-        target_table = edge_info.get("target_table", "vertices")
+        # Get edge configuration from new schema
+        edge_config = self._get_edge_config(edge_label)
+
+        if edge_config:
+            # Extract edge table information
+            edge_table_source = edge_config["tableSource"]
+            edge_table = f"{edge_table_source['catalog']}.{edge_table_source['schema']}.{edge_table_source['table']}"
+            from_id_field = edge_config["fromId"]["fields"][0]["field"]
+            to_id_field = edge_config["toId"]["fields"][0]["field"]
+
+            # Get target vertex configuration
+            target_vertex_label = edge_config["toVertex"]
+            target_vertex_config = self._get_vertex_config(target_vertex_label)
+
+            if target_vertex_config:
+                target_table_source = target_vertex_config["oneToOne"]["tableSource"]
+                target_table = f"{target_table_source['catalog']}.{target_table_source['schema']}.{target_table_source['table']}"
+                target_id_field = target_vertex_config["oneToOne"]["id"]["fields"][0]["field"]
+            else:
+                target_table = "vertices"
+                target_id_field = "id"
+        else:
+            # Fallback to defaults
+            edge_table = "edges"
+            from_id_field = "from_id"
+            to_id_field = "to_id"
+            target_table = "vertices"
+            target_id_field = "id"
 
         # Create aliases
         edge_alias = f"e{self.table_counter}"
@@ -212,14 +245,13 @@ class SQLGeneratorVisitor(GremlinVisitor):
         # Join edge table
         self.joins.append(
             f"INNER JOIN {edge_table} AS {edge_alias} "
-            f"ON {self.current_table_alias}.id = {edge_alias}.from_id "
-            f"AND {edge_alias}.label = '{edge_label}'"
+            f"ON {self.current_table_alias}.id = {edge_alias}.{from_id_field}"
         )
 
         # Join target vertex table
         self.joins.append(
             f"INNER JOIN {target_table} AS {vertex_alias} "
-            f"ON {edge_alias}.to_id = {vertex_alias}.id"
+            f"ON {edge_alias}.{to_id_field} = {vertex_alias}.{target_id_field}"
         )
 
         self.current_table_alias = vertex_alias
@@ -228,9 +260,34 @@ class SQLGeneratorVisitor(GremlinVisitor):
         """Handle in() - traverse incoming edges"""
         edge_label = node.args[0]
 
-        edge_info = self.graph_schema["edges"].get(edge_label, {})
-        edge_table = edge_info.get("table", "edges")
-        source_table = edge_info.get("source_table", "vertices")
+        # Get edge configuration from new schema
+        edge_config = self._get_edge_config(edge_label)
+
+        if edge_config:
+            # Extract edge table information
+            edge_table_source = edge_config["tableSource"]
+            edge_table = f"{edge_table_source['catalog']}.{edge_table_source['schema']}.{edge_table_source['table']}"
+            from_id_field = edge_config["fromId"]["fields"][0]["field"]
+            to_id_field = edge_config["toId"]["fields"][0]["field"]
+
+            # Get source vertex configuration
+            source_vertex_label = edge_config["fromVertex"]
+            source_vertex_config = self._get_vertex_config(source_vertex_label)
+
+            if source_vertex_config:
+                source_table_source = source_vertex_config["oneToOne"]["tableSource"]
+                source_table = f"{source_table_source['catalog']}.{source_table_source['schema']}.{source_table_source['table']}"
+                source_id_field = source_vertex_config["oneToOne"]["id"]["fields"][0]["field"]
+            else:
+                source_table = "vertices"
+                source_id_field = "id"
+        else:
+            # Fallback to defaults
+            edge_table = "edges"
+            from_id_field = "from_id"
+            to_id_field = "to_id"
+            source_table = "vertices"
+            source_id_field = "id"
 
         edge_alias = f"e{self.table_counter}"
         self.table_counter += 1
@@ -239,13 +296,12 @@ class SQLGeneratorVisitor(GremlinVisitor):
 
         self.joins.append(
             f"INNER JOIN {edge_table} AS {edge_alias} "
-            f"ON {self.current_table_alias}.id = {edge_alias}.to_id "
-            f"AND {edge_alias}.label = '{edge_label}'"
+            f"ON {self.current_table_alias}.id = {edge_alias}.{to_id_field}"
         )
 
         self.joins.append(
             f"INNER JOIN {source_table} AS {vertex_alias} "
-            f"ON {edge_alias}.from_id = {vertex_alias}.id"
+            f"ON {edge_alias}.{from_id_field} = {vertex_alias}.{source_id_field}"
         )
 
         self.current_table_alias = vertex_alias
@@ -265,6 +321,22 @@ class SQLGeneratorVisitor(GremlinVisitor):
                 return current.args[0]  # Label is first arg
             current = current.next_step
         return "default"
+
+    def _get_vertex_config(self, label: str) -> Optional[Dict[str, Any]]:
+        """Get vertex configuration from schema by label"""
+        if "vertices" in self.graph_schema:
+            for vertex in self.graph_schema["vertices"]:
+                if vertex["label"] == label:
+                    return vertex
+        return None
+
+    def _get_edge_config(self, label: str) -> Optional[Dict[str, Any]]:
+        """Get edge configuration from schema by label"""
+        if "edges" in self.graph_schema:
+            for edge in self.graph_schema["edges"]:
+                if edge["label"] == label:
+                    return edge
+        return None
 
     def _format_sql_value(self, value: Any) -> str:
         """Format Python value for SQL"""
@@ -346,13 +418,116 @@ class QueryAnalyzerVisitor(GremlinVisitor):
 def demo_hybrid_approach():
     """
     Demonstrate hybrid AST + Visitor pattern
-    Query: g.V().has('User', 'age', gt(25)).out('purchased').has('Product', 'price', lt(100))
+    Query: g.V().has('customer', 'customer_id', eq('C123')).out('creates').has('transaction', 'transaction_id', eq('T456'))
     """
 
-    # Define graph schema (mapping to relational tables)
+    # Define graph schema (matching schema.json structure with mock data)
     graph_schema = {
-        "vertex_tables": {"User": "users", "Product": "products"},
-        "edges": {"purchased": {"table": "purchases", "target_table": "products"}},
+        "vertices": [
+            {
+                "label": "customer",
+                "oneToOne": {
+                    "tableSource": {
+                        "catalog": "customer_domain",
+                        "schema": "customer_domain",
+                        "table": "customer"
+                    },
+                    "id": {
+                        "fields": [
+                            {
+                                "type": "STRING",
+                                "field": "customer_id",
+                                "alias": "puppy_id_customer_id"
+                            }
+                        ]
+                    },
+                    "attributes": [
+                        {
+                            "type": "STRING",
+                            "field": "customer_id",
+                            "alias": "customer_id"
+                        },
+                        {
+                            "type": "STRING",
+                            "field": "first_name",
+                            "alias": "first_name"
+                        }
+                    ]
+                }
+            },
+            {
+                "label": "transaction",
+                "oneToOne": {
+                    "tableSource": {
+                        "catalog": "customer_domain",
+                        "schema": "customer_domain",
+                        "table": "customer_transaction"
+                    },
+                    "id": {
+                        "fields": [
+                            {
+                                "type": "STRING",
+                                "field": "transaction_id",
+                                "alias": "puppy_id_transaction_id"
+                            }
+                        ]
+                    },
+                    "attributes": [
+                        {
+                            "type": "STRING",
+                            "field": "transaction_id",
+                            "alias": "transaction_id"
+                        }
+                    ]
+                }
+            }
+        ],
+        "edges": [
+            {
+                "label": "creates",
+                "fromVertex": "customer",
+                "toVertex": "transaction",
+                "tableSource": {
+                    "catalog": "customer_domain",
+                    "schema": "customer_domain",
+                    "table": "customer_transaction"
+                },
+                "id": {
+                    "fields": [
+                        {
+                            "type": "STRING",
+                            "field": "transaction_id",
+                            "alias": "puppy_id_transaction_id"
+                        }
+                    ]
+                },
+                "fromId": {
+                    "fields": [
+                        {
+                            "type": "STRING",
+                            "field": "customer_id",
+                            "alias": "puppy_from_customer_id"
+                        }
+                    ]
+                },
+                "toId": {
+                    "fields": [
+                        {
+                            "type": "STRING",
+                            "field": "transaction_id",
+                            "alias": "puppy_to_transaction_id"
+                        }
+                    ]
+                },
+                "attributes": [
+                    {
+                        "type": "STRING",
+                        "field": "transaction_id",
+                        "alias": "transaction_id"
+                    }
+                ]
+            }
+        ]
     }
 
     print("=" * 80)
@@ -364,9 +539,9 @@ def demo_hybrid_approach():
     builder = GremlinASTBuilder()
     ast = (
         builder.V()
-        .has("User", "age", Predicate(PredicateOp.GT, 25))
-        .out("purchased")
-        .has("Product", "price", Predicate(PredicateOp.LT, 100))
+        .has("customer", "customer_id", Predicate(PredicateOp.EQ, "C123"))
+        .out("creates")
+        .has("transaction", "transaction_id", Predicate(PredicateOp.EQ, "T456"))
         .build()
     )
 
@@ -400,45 +575,45 @@ def demo_hybrid_approach():
     print(sql)
 
 
-def demo_complex_query():
-    """More complex example with multiple traversals"""
+# def demo_complex_query():
+#     """More complex example with multiple traversals"""
 
-    graph_schema = {
-        "vertex_tables": {
-            "User": "users",
-            "Product": "products",
-            "Category": "categories",
-        },
-        "edges": {
-            "purchased": {"table": "purchases", "target_table": "products"},
-            "belongs_to": {"table": "product_categories", "target_table": "categories"},
-        },
-    }
+#     graph_schema = {
+#         "vertex_tables": {
+#             "User": "users",
+#             "Product": "products",
+#             "Category": "categories",
+#         },
+#         "edges": {
+#             "purchased": {"table": "purchases", "target_table": "products"},
+#             "belongs_to": {"table": "product_categories", "target_table": "categories"},
+#         },
+#     }
 
-    print("\n\n" + "=" * 80)
-    print("COMPLEX QUERY EXAMPLE")
-    print("=" * 80)
-    print("\nQuery: Find categories of products purchased by users over 25")
-    print("g.V().has('User', 'age', gt(25)).out('purchased').out('belongs_to')")
+#     print("\n\n" + "=" * 80)
+#     print("COMPLEX QUERY EXAMPLE")
+#     print("=" * 80)
+#     print("\nQuery: Find categories of products purchased by users over 25")
+#     print("g.V().has('User', 'age', gt(25)).out('purchased').out('belongs_to')")
 
-    builder = GremlinASTBuilder()
-    ast = (
-        builder.V()
-        .has("User", "age", Predicate(PredicateOp.GT, 25))
-        .out("purchased")
-        .out("belongs_to")
-        .values("name")
-        .build()
-    )
+#     builder = GremlinASTBuilder()
+#     ast = (
+#         builder.V()
+#         .has("User", "age", Predicate(PredicateOp.GT, 25))
+#         .out("purchased")
+#         .out("belongs_to")
+#         .values("name")
+#         .build()
+#     )
 
-    sql_generator = SQLGeneratorVisitor(graph_schema)
-    sql_generator.visit(ast)
-    sql = sql_generator.generate_sql()
+#     sql_generator = SQLGeneratorVisitor(graph_schema)
+#     sql_generator.visit(ast)
+#     sql = sql_generator.generate_sql()
 
-    print("\nGenerated SQL:")
-    print("-" * 80)
-    print(sql)
-    print("-" * 80)
+#     print("\nGenerated SQL:")
+#     print("-" * 80)
+#     print(sql)
+#     print("-" * 80)
 
 
 if __name__ == "__main__":
