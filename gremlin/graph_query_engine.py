@@ -128,6 +128,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
         self.select_columns: List[str] = ["*"]
         self.table_counter = 0
         self.current_table_alias = None
+        self.current_vertex_id_field = None  # Track current vertex ID field
 
     def visit(self, node: ASTNode):
         """Main visit method that dispatches to specific handlers"""
@@ -164,6 +165,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
 
         self.tables.append(f"{table_name} AS {alias}")
         self.current_table_alias = alias
+        self.current_vertex_id_field = id_field  # Track the ID field
 
         # If specific IDs provided
         if node.args and node.args[0]:
@@ -242,10 +244,11 @@ class SQLGeneratorVisitor(GremlinVisitor):
         vertex_alias = f"v{self.table_counter}"
         self.table_counter += 1
 
-        # Join edge table
+        # Join edge table - use current vertex ID field instead of hardcoded "id"
+        source_id_field = self.current_vertex_id_field or "id"
         self.joins.append(
             f"INNER JOIN {edge_table} AS {edge_alias} "
-            f"ON {self.current_table_alias}.id = {edge_alias}.{from_id_field}"
+            f"ON {self.current_table_alias}.{source_id_field} = {edge_alias}.{from_id_field}"
         )
 
         # Join target vertex table
@@ -255,6 +258,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
         )
 
         self.current_table_alias = vertex_alias
+        self.current_vertex_id_field = target_id_field  # Update to target vertex ID field
 
     def visit_in(self, node: ASTNode):
         """Handle in() - traverse incoming edges"""
@@ -294,9 +298,11 @@ class SQLGeneratorVisitor(GremlinVisitor):
         vertex_alias = f"v{self.table_counter}"
         self.table_counter += 1
 
+        # Join edge table - use current vertex ID field instead of hardcoded "id"
+        current_id_field = self.current_vertex_id_field or "id"
         self.joins.append(
             f"INNER JOIN {edge_table} AS {edge_alias} "
-            f"ON {self.current_table_alias}.id = {edge_alias}.{to_id_field}"
+            f"ON {self.current_table_alias}.{current_id_field} = {edge_alias}.{to_id_field}"
         )
 
         self.joins.append(
@@ -305,6 +311,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
         )
 
         self.current_table_alias = vertex_alias
+        self.current_vertex_id_field = source_id_field  # Update to source vertex ID field
 
     def visit_values(self, node: ASTNode):
         """Handle values() - select specific properties"""
@@ -418,65 +425,100 @@ class QueryAnalyzerVisitor(GremlinVisitor):
 def demo_hybrid_approach():
     """
     Demonstrate hybrid AST + Visitor pattern
-    Query: g.V().has('customer', 'customer_id', eq('C123')).out('creates').has('transaction', 'transaction_id', eq('T456'))
+    Query: g.V().has('subscriber', 'a_subscriber_id', eq(12345)).out('calls').has('call_event', 'duration_seconds', gt(60))
     """
 
-    # Define graph schema (matching schema.json structure with mock data)
+    # Define graph schema (based on redberry.fact_cdr table)
     graph_schema = {
         "vertices": [
             {
-                "label": "customer",
+                "label": "subscriber",
                 "oneToOne": {
                     "tableSource": {
-                        "catalog": "customer_domain",
-                        "schema": "customer_domain",
-                        "table": "customer"
+                        "catalog": "redberry",
+                        "schema": "redberry",
+                        "table": "fact_cdr"
                     },
                     "id": {
                         "fields": [
                             {
-                                "type": "STRING",
-                                "field": "customer_id",
-                                "alias": "puppy_id_customer_id"
+                                "type": "UInt64",
+                                "field": "a_subscriber_id",
+                                "alias": "puppy_id_a_subscriber_id"
                             }
                         ]
                     },
                     "attributes": [
                         {
-                            "type": "STRING",
-                            "field": "customer_id",
-                            "alias": "customer_id"
+                            "type": "UInt64",
+                            "field": "a_subscriber_id",
+                            "alias": "a_subscriber_id"
                         },
                         {
-                            "type": "STRING",
-                            "field": "first_name",
-                            "alias": "first_name"
+                            "type": "String",
+                            "field": "a_number",
+                            "alias": "a_number"
+                        },
+                        {
+                            "type": "String",
+                            "field": "operator",
+                            "alias": "operator"
                         }
                     ]
                 }
             },
             {
-                "label": "transaction",
+                "label": "call_event",
                 "oneToOne": {
                     "tableSource": {
-                        "catalog": "customer_domain",
-                        "schema": "customer_domain",
-                        "table": "customer_transaction"
+                        "catalog": "redberry",
+                        "schema": "redberry",
+                        "table": "fact_cdr"
                     },
                     "id": {
                         "fields": [
                             {
-                                "type": "STRING",
-                                "field": "transaction_id",
-                                "alias": "puppy_id_transaction_id"
+                                "type": "UInt64",
+                                "field": "event_id",
+                                "alias": "puppy_id_event_id"
                             }
                         ]
                     },
                     "attributes": [
                         {
-                            "type": "STRING",
-                            "field": "transaction_id",
-                            "alias": "transaction_id"
+                            "type": "UInt64",
+                            "field": "event_id",
+                            "alias": "event_id"
+                        },
+                        {
+                            "type": "String",
+                            "field": "event_type",
+                            "alias": "event_type"
+                        },
+                        {
+                            "type": "DateTime",
+                            "field": "event_datetime",
+                            "alias": "event_datetime"
+                        },
+                        {
+                            "type": "Int32",
+                            "field": "duration_seconds",
+                            "alias": "duration_seconds"
+                        },
+                        {
+                            "type": "String",
+                            "field": "b_number",
+                            "alias": "b_number"
+                        },
+                        {
+                            "type": "Float64",
+                            "field": "latitude",
+                            "alias": "latitude"
+                        },
+                        {
+                            "type": "Float64",
+                            "field": "longitude",
+                            "alias": "longitude"
                         }
                     ]
                 }
@@ -484,46 +526,51 @@ def demo_hybrid_approach():
         ],
         "edges": [
             {
-                "label": "creates",
-                "fromVertex": "customer",
-                "toVertex": "transaction",
+                "label": "calls",
+                "fromVertex": "subscriber",
+                "toVertex": "call_event",
                 "tableSource": {
-                    "catalog": "customer_domain",
-                    "schema": "customer_domain",
-                    "table": "customer_transaction"
+                    "catalog": "redberry",
+                    "schema": "redberry",
+                    "table": "fact_cdr"
                 },
                 "id": {
                     "fields": [
                         {
-                            "type": "STRING",
-                            "field": "transaction_id",
-                            "alias": "puppy_id_transaction_id"
+                            "type": "UInt64",
+                            "field": "event_id",
+                            "alias": "puppy_id_event_id"
                         }
                     ]
                 },
                 "fromId": {
                     "fields": [
                         {
-                            "type": "STRING",
-                            "field": "customer_id",
-                            "alias": "puppy_from_customer_id"
+                            "type": "UInt64",
+                            "field": "a_subscriber_id",
+                            "alias": "puppy_from_a_subscriber_id"
                         }
                     ]
                 },
                 "toId": {
                     "fields": [
                         {
-                            "type": "STRING",
-                            "field": "transaction_id",
-                            "alias": "puppy_to_transaction_id"
+                            "type": "UInt64",
+                            "field": "event_id",
+                            "alias": "puppy_to_event_id"
                         }
                     ]
                 },
                 "attributes": [
                     {
-                        "type": "STRING",
-                        "field": "transaction_id",
-                        "alias": "transaction_id"
+                        "type": "String",
+                        "field": "call_type",
+                        "alias": "call_type"
+                    },
+                    {
+                        "type": "DateTime",
+                        "field": "event_datetime",
+                        "alias": "event_datetime"
                     }
                 ]
             }
@@ -536,12 +583,13 @@ def demo_hybrid_approach():
 
     # STEP 1: Build AST using simple chained approach
     print("\n[STEP 1] Building AST from Gremlin-like API...")
+    print("Query: Find call events for subscriber 12345 with duration > 60 seconds")
     builder = GremlinASTBuilder()
     ast = (
         builder.V()
-        .has("customer", "customer_id", Predicate(PredicateOp.EQ, "C123"))
-        .out("creates")
-        .has("transaction", "transaction_id", Predicate(PredicateOp.EQ, "T456"))
+        .has("subscriber", "a_subscriber_id", Predicate(PredicateOp.EQ, 12345))
+        .out("calls")
+        .has("call_event", "duration_seconds", Predicate(PredicateOp.GT, 60))
         .build()
     )
 
