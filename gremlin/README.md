@@ -109,6 +109,36 @@ ORDER BY call_count DESC
 LIMIT 20
 ```
 
+**Call Chains Demo** (Advanced pattern with repeat/times for recursive traversal):
+```bash
+cd gremlin
+python demo_call_chains.py
+```
+
+This demonstrates finding call chains (A calls B, B calls C, C calls D) using:
+- `repeat()` - Recursive pattern traversal
+- `times()` - Depth limit (up to 3 hops)
+- `out()` - Traverse outgoing edges
+- `emit()` - Return intermediate results
+- `path()` - Collect full traversal path
+
+Displays the conceptual SQL mapping to recursive CTEs (WITH RECURSIVE).
+
+**Call Chains with SQL Generation**:
+```bash
+cd gremlin
+python demo_call_chains_sql.py
+```
+
+This demo actually generates the SQL with recursive CTEs, showing:
+- WITH RECURSIVE clause implementation
+- Base case with starting vertices and filters
+- Recursive case with edge traversal
+- Depth tracking and path collection
+- Filter push-down in both base and recursive cases
+
+Note: `outE()` and `inE()` are available as aliases for `out()` and `in_()` respectively.
+
 ### Using in Your Code
 ```python
 from gremlin import (

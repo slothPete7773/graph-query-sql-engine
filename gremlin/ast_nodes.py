@@ -67,13 +67,33 @@ class GremlinASTBuilder:
         """Filter step"""
         return self._add_step("has", list(args))
 
+    def hasLabel(self, label: str):
+        """Filter vertices by label"""
+        return self._add_step("hasLabel", [label])
+
     def out(self, edge_label: str):
         """Traverse outgoing edges"""
         return self._add_step("out", [edge_label])
 
+    def outE(self, edge_label: str):
+        """Alias for out() - traverse outgoing edges"""
+        return self.out(edge_label)
+
     def in_(self, edge_label: str):
         """Traverse incoming edges"""
         return self._add_step("in", [edge_label])
+
+    def inE(self, edge_label: str):
+        """Alias for in_() - traverse incoming edges"""
+        return self.in_(edge_label)
+
+    def inV(self):
+        """From edge, traverse to incoming vertex"""
+        return self._add_step("inV", [])
+
+    def outV(self):
+        """From edge, traverse to outgoing vertex"""
+        return self._add_step("outV", [])
 
     def values(self, *property_keys):
         """Get property values"""
@@ -110,6 +130,22 @@ class GremlinASTBuilder:
     def as_(self, label: str):
         """Label a step for later reference"""
         return self._add_step("as", [label])
+
+    def repeat(self, traversal):
+        """Repeat a traversal pattern"""
+        return self._add_step("repeat", [traversal])
+
+    def times(self, n: int):
+        """Specify number of times to repeat"""
+        return self._add_step("times", [n])
+
+    def emit(self):
+        """Emit intermediate results during repeat"""
+        return self._add_step("emit", [])
+
+    def path(self):
+        """Collect the full path traversed"""
+        return self._add_step("path", [])
 
     def _add_step(self, step_type: str, args: List[Any]):
         """Internal method to add step to chain"""

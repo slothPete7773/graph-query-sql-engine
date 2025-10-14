@@ -1,17 +1,41 @@
-"""
-Demo script showing Gremlin to SQL conversion with the hybrid AST + Visitor pattern
-"""
-
-# Try relative imports first (when imported as a module)
 try:
-    from .ast_nodes import GremlinASTBuilder, Predicate, PredicateOp
-    from .visitors import SQLGeneratorVisitor, QueryAnalyzerVisitor
+    from .ast_nodes import (
+        ASTNode,
+        GremlinASTBuilder,
+        Predicate,
+        PredicateOp,
+    )
+    from .visitors import (
+        GremlinVisitor,
+        SQLGeneratorVisitor,
+        QueryAnalyzerVisitor,
+    )
     from .schema import get_cdr_graph_schema
 except ImportError:
     # Fall back to absolute imports (when run directly)
-    from ast_nodes import GremlinASTBuilder, Predicate, PredicateOp
-    from visitors import SQLGeneratorVisitor, QueryAnalyzerVisitor
+    from ast_nodes import (
+        ASTNode,
+        GremlinASTBuilder,
+        Predicate,
+        PredicateOp,
+    )
+    from visitors import (
+        GremlinVisitor,
+        SQLGeneratorVisitor,
+        QueryAnalyzerVisitor,
+    )
     from schema import get_cdr_graph_schema
+
+__all__ = [
+    "ASTNode",
+    "GremlinASTBuilder",
+    "Predicate",
+    "PredicateOp",
+    "GremlinVisitor",
+    "SQLGeneratorVisitor",
+    "QueryAnalyzerVisitor",
+    "get_cdr_graph_schema",
+]
 
 
 def demo_hybrid_approach():
@@ -51,18 +75,17 @@ def demo_hybrid_approach():
         current = current.next_step
         step_num += 1
 
-    # STEP 2: Analyze query using Analyzer Visitor
-    print("\n[STEP 2] Analyzing query for optimization...")
-    analyzer = QueryAnalyzerVisitor()
-    analyzer.visit(ast)
-    analysis = analyzer.get_analysis()
+    # # STEP 2: Analyze query using Analyzer Visitor
+    # print("\n[STEP 2] Analyzing query for optimization...")
+    # analyzer = QueryAnalyzerVisitor()
+    # analyzer.visit(ast)
+    # analysis = analyzer.get_analysis()
 
-    print("\nQuery Analysis:")
-    for key, value in analysis.items():
-        print(f"  {key}: {value}")
+    # print("\nQuery Analysis:")
+    # for key, value in analysis.items():
+    #     print(f"  {key}: {value}")
 
     # STEP 3: Generate SQL using SQL Generator Visitor
-    print("\n[STEP 3] Generating optimized SQL with filter push-down...")
     sql_generator = SQLGeneratorVisitor(graph_schema)
     sql_generator.visit(ast)
     sql = sql_generator.generate_sql()

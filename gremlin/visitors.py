@@ -1,5 +1,6 @@
 """
 Visitor pattern implementations for processing Gremlin AST nodes
+— ClickHouse-compatible SQL generation
 """
 
 from typing import Any, List, Dict, Optional
@@ -25,6 +26,7 @@ class GremlinVisitor(ABC):
 class SQLGeneratorVisitor(GremlinVisitor):
     """
     Visitor that generates optimized SQL with filter push-down.
+    ClickHouse-compatible (no WITH RECURSIVE; see _generate_clickhouse_recursive_sql()).
     Avoids unnecessary self-joins when all tables are the same.
     """
 
@@ -47,21 +49,24 @@ class SQLGeneratorVisitor(GremlinVisitor):
         self.has_aggregation = False
         self.pending_by_args: List[Any] = []  # Store by() args for next step
 
+        # Recursive traversal support
+        self.repeat_traversal: Optional[ASTNode] = None
+        self.repeat_times: Optional[int] = None
+        self.repeat_emit: bool = False
+        self.collect_path: bool = False
+        self.use_recursive_cte: bool = False  # stays True to trigger ClickHouse path
+
     def visit(self, node: ASTNode):
         """Main visit method that dispatches to specific handlers"""
         if node is None:
             return
 
-        # Dispatch based on step type
         method_name = f"visit_{node.step_type}"
         if hasattr(self, method_name):
             getattr(self, method_name)(node)
         else:
-            raise NotImplementedError(
-                f"Step '{node.step_type}' not implemented"
-            )
+            raise NotImplementedError(f"Step '{node.step_type}' not implemented")
 
-        # Continue to next step
         if node.next_step:
             self.visit(node.next_step)
 
@@ -74,42 +79,36 @@ class SQLGeneratorVisitor(GremlinVisitor):
             table_source = vertex_config["oneToOne"]["tableSource"]
             schema = table_source["schema"]
             table = table_source["table"]
+            # ClickHouse allows db.table form
             table_name = f"{schema}.{table}"
             id_field = vertex_config["oneToOne"]["id"]["fields"][0]["field"]
         else:
-            # Fallback to default
             table_name = "vertices"
             id_field = "id"
 
         alias = f"v{self.table_counter}"
         self.table_counter += 1
 
+        # ClickHouse supports AS for table aliases
         self.tables.append(f"{table_name} AS {alias}")
         self.current_table_alias = alias
-        self.current_vertex_id_field = id_field  # Track the ID field
-        self.current_table_name = table_name  # Track the table name
+        self.current_vertex_id_field = id_field
+        self.current_table_name = table_name
 
         # If specific IDs provided
         if node.args and node.args[0]:
-            ids = (
-                node.args[0]
-                if isinstance(node.args[0], list)
-                else [node.args[0]]
-            )
-            id_list = ", ".join(f"'{id}'" for id in ids)
+            ids = node.args[0] if isinstance(node.args[0], list) else [node.args[0]]
+            # Single-quote string values for CH. Numeric literals are fine too.
+            id_list = ", ".join(self._format_sql_value(id_) for id_ in ids)
             self.where_clauses.append(f"{alias}.{id_field} IN ({id_list})")
 
     def visit_has(self, node: ASTNode):
         """Handle has() - filter vertices/edges by property"""
         args = node.args
-
         if len(args) == 3:
             # has(label, key, predicate)
             _label, key, predicate = args
-
-            # This is a vertex label filter - handled in V() step
             if isinstance(predicate, Predicate):
-                # Property filter with predicate
                 sql_op = predicate.to_sql_operator()
                 value = self._format_sql_value(predicate.value)
                 self.where_clauses.append(
@@ -119,14 +118,12 @@ class SQLGeneratorVisitor(GremlinVisitor):
         elif len(args) == 2:
             # has(key, value) or has(key, predicate)
             key, value_or_predicate = args
-
             if isinstance(value_or_predicate, Predicate):
                 sql_op = value_or_predicate.to_sql_operator()
                 value = self._format_sql_value(value_or_predicate.value)
             else:
                 sql_op = "="
                 value = self._format_sql_value(value_or_predicate)
-
             self.where_clauses.append(
                 f"{self.current_table_alias}.{key} {sql_op} {value}"
             )
@@ -134,12 +131,9 @@ class SQLGeneratorVisitor(GremlinVisitor):
     def visit_out(self, node: ASTNode):
         """Handle out() - traverse outgoing edges"""
         edge_label = node.args[0]
-
-        # Get edge configuration from new schema
         edge_config = self._get_edge_config(edge_label)
 
         if edge_config:
-            # Extract edge table information
             edge_table_source = edge_config["tableSource"]
             edge_schema = edge_table_source["schema"]
             edge_tbl = edge_table_source["table"]
@@ -147,60 +141,45 @@ class SQLGeneratorVisitor(GremlinVisitor):
             from_id_field = edge_config["fromId"]["fields"][0]["field"]
             to_id_field = edge_config["toId"]["fields"][0]["field"]
 
-            # Get target vertex configuration
             target_vertex_label = edge_config["toVertex"]
-            target_vertex_config = self._get_vertex_config(
-                target_vertex_label
-            )
+            target_vertex_config = self._get_vertex_config(target_vertex_label)
 
             if target_vertex_config:
-                target_table_source = target_vertex_config["oneToOne"][
-                    "tableSource"
-                ]
+                target_table_source = target_vertex_config["oneToOne"]["tableSource"]
                 target_schema = target_table_source["schema"]
                 target_tbl = target_table_source["table"]
                 target_table = f"{target_schema}.{target_tbl}"
-                target_id_field = target_vertex_config["oneToOne"]["id"][
-                    "fields"
-                ][0]["field"]
+                target_id_field = target_vertex_config["oneToOne"]["id"]["fields"][0][
+                    "field"
+                ]
             else:
                 target_table = "vertices"
                 target_id_field = "id"
         else:
-            # Fallback to defaults
             edge_table = "edges"
             from_id_field = "from_id"
             to_id_field = "to_id"
             target_table = "vertices"
             target_id_field = "id"
 
-        # Check if all tables are the same (source, edge, target)
-        # If so, avoid self-joins and just continue using the same alias
         if self.current_table_name == edge_table == target_table:
-            # Same table - no join needed, just continue with same alias
-            # The traversal is just filtering on the same table
+            # same-table optimization
             self.current_vertex_id_field = target_id_field
-            # Don't update current_table_alias - keep using the same one
         else:
-            # Different tables - need actual joins
             edge_alias = f"e{self.table_counter}"
             self.table_counter += 1
             vertex_alias = f"v{self.table_counter}"
             self.table_counter += 1
 
-            # Join edge table - use current vertex ID field
             source_id_field = self.current_vertex_id_field or "id"
+            # ClickHouse supports INNER JOIN ... ON ...
             self.joins.append(
                 f"INNER JOIN {edge_table} AS {edge_alias} "
-                f"ON {self.current_table_alias}.{source_id_field} = "
-                f"{edge_alias}.{from_id_field}"
+                f"ON {self.current_table_alias}.{source_id_field} = {edge_alias}.{from_id_field}"
             )
-
-            # Join target vertex table
             self.joins.append(
                 f"INNER JOIN {target_table} AS {vertex_alias} "
-                f"ON {edge_alias}.{to_id_field} = "
-                f"{vertex_alias}.{target_id_field}"
+                f"ON {edge_alias}.{to_id_field} = {vertex_alias}.{target_id_field}"
             )
 
             self.current_table_alias = vertex_alias
@@ -210,12 +189,9 @@ class SQLGeneratorVisitor(GremlinVisitor):
     def visit_in(self, node: ASTNode):
         """Handle in() - traverse incoming edges"""
         edge_label = node.args[0]
-
-        # Get edge configuration from new schema
         edge_config = self._get_edge_config(edge_label)
 
         if edge_config:
-            # Extract edge table information
             edge_table_source = edge_config["tableSource"]
             edge_schema = edge_table_source["schema"]
             edge_tbl = edge_table_source["table"]
@@ -223,59 +199,43 @@ class SQLGeneratorVisitor(GremlinVisitor):
             from_id_field = edge_config["fromId"]["fields"][0]["field"]
             to_id_field = edge_config["toId"]["fields"][0]["field"]
 
-            # Get source vertex configuration
             source_vertex_label = edge_config["fromVertex"]
-            source_vertex_config = self._get_vertex_config(
-                source_vertex_label
-            )
+            source_vertex_config = self._get_vertex_config(source_vertex_label)
 
             if source_vertex_config:
-                source_table_source = source_vertex_config["oneToOne"][
-                    "tableSource"
-                ]
+                source_table_source = source_vertex_config["oneToOne"]["tableSource"]
                 source_schema = source_table_source["schema"]
                 source_tbl = source_table_source["table"]
                 source_table = f"{source_schema}.{source_tbl}"
-                source_id_field = source_vertex_config["oneToOne"]["id"][
-                    "fields"
-                ][0]["field"]
+                source_id_field = source_vertex_config["oneToOne"]["id"]["fields"][0][
+                    "field"
+                ]
             else:
                 source_table = "vertices"
                 source_id_field = "id"
         else:
-            # Fallback to defaults
             edge_table = "edges"
             from_id_field = "from_id"
             to_id_field = "to_id"
             source_table = "vertices"
             source_id_field = "id"
 
-        # Check if all tables are the same (current, edge, source)
-        # If so, avoid self-joins and just continue using the same alias
         if self.current_table_name == edge_table == source_table:
-            # Same table - no join needed, just continue with same alias
-            # The traversal is just filtering on the same table
             self.current_vertex_id_field = source_id_field
-            # Don't update current_table_alias - keep using the same one
         else:
-            # Different tables - need actual joins
             edge_alias = f"e{self.table_counter}"
             self.table_counter += 1
             vertex_alias = f"v{self.table_counter}"
             self.table_counter += 1
 
-            # Join edge table - use current vertex ID field
             current_id_field = self.current_vertex_id_field or "id"
             self.joins.append(
                 f"INNER JOIN {edge_table} AS {edge_alias} "
-                f"ON {self.current_table_alias}.{current_id_field} = "
-                f"{edge_alias}.{to_id_field}"
+                f"ON {self.current_table_alias}.{current_id_field} = {edge_alias}.{to_id_field}"
             )
-
             self.joins.append(
                 f"INNER JOIN {source_table} AS {vertex_alias} "
-                f"ON {edge_alias}.{from_id_field} = "
-                f"{vertex_alias}.{source_id_field}"
+                f"ON {edge_alias}.{from_id_field} = {vertex_alias}.{source_id_field}"
             )
 
             self.current_table_alias = vertex_alias
@@ -290,79 +250,50 @@ class SQLGeneratorVisitor(GremlinVisitor):
         ]
 
     def visit_group(self, node: ASTNode):
-        """
-        Handle group() - initiates aggregation mode
-        Following by() steps will define group by fields and aggregations
-        """
+        """Handle group() - initiates aggregation mode"""
         self.has_aggregation = True
-        # Process next step to collect by() modulator args
         if node.next_step and node.next_step.step_type == "by":
-            # Collect all consecutive by() steps
             current = node.next_step
             by_steps = []
             while current and current.step_type == "by":
                 by_steps.append(current.args)
                 current = current.next_step
 
-            # First by() defines GROUP BY fields
             if len(by_steps) >= 1:
                 group_fields = by_steps[0]
                 for field in group_fields:
-                    self.group_by_fields.append(
-                        f"{self.current_table_alias}.{field}"
-                    )
+                    self.group_by_fields.append(f"{self.current_table_alias}.{field}")
 
-            # Second by() defines aggregations (if present)
             if len(by_steps) >= 2:
                 agg_specs = by_steps[1]
-                # Parse aggregation specifications
-                # Format: ["count", "sum"] or similar
                 for agg_type in agg_specs:
                     if agg_type == "count":
                         self.aggregations.append(
                             {"type": "COUNT", "field": "*", "alias": "count"}
                         )
                     elif agg_type == "sum":
-                        # Sum will be processed by visit_sum
-                        pass
+                        pass  # sum handled by visit_sum
 
     def visit_by(self, node: ASTNode):
-        """
-        Handle by() - modulator for group/order operations
-        Stores args for parent step to process
-        """
-        # Store the args for the parent step to use
         self.pending_by_args = node.args
 
     def visit_count(self, node: ASTNode):
-        """Handle count() - count aggregation"""
         if self.has_aggregation:
             self.aggregations.append(
                 {"type": "COUNT", "field": "*", "alias": "call_count"}
             )
         else:
-            # Standalone count
             self.select_columns = ["COUNT(*)"]
 
     def visit_sum(self, node: ASTNode):
-        """Handle sum() - sum aggregation"""
         field = node.args[0] if node.args else None
         if field and self.has_aggregation:
             full_field = f"{self.current_table_alias}.{field}"
             self.aggregations.append(
-                {
-                    "type": "SUM",
-                    "field": full_field,
-                    "alias": f"total_{field}",
-                }
+                {"type": "SUM", "field": full_field, "alias": f"total_{field}"}
             )
 
     def visit_order(self, node: ASTNode):
-        """
-        Handle order() - ordering step
-        Expects by() modulator to specify field and direction
-        """
-        # Check for following by() step
         if node.next_step and node.next_step.step_type == "by":
             by_node = node.next_step
             if len(by_node.args) >= 2:
@@ -374,34 +305,60 @@ class SQLGeneratorVisitor(GremlinVisitor):
                 self.order_by_clauses.append(f"{field} DESC")
 
     def visit_limit(self, node: ASTNode):
-        """Handle limit() - result limiting"""
         if node.args and len(node.args) > 0:
             self.limit_value = int(node.args[0])
 
     def visit_select(self, node: ASTNode):
-        """Handle select() - select specific keys"""
         keys = node.args
         if not self.has_aggregation:
-            self.select_columns = [
-                f"{self.current_table_alias}.{key}" for key in keys
-            ]
+            self.select_columns = [f"{self.current_table_alias}.{key}" for key in keys]
 
     def visit_as(self, node: ASTNode):
-        """Handle as() - step labeling (for future use)"""
-        # This could be used for more complex queries with labels
         pass
 
+    def visit_hasLabel(self, node: ASTNode):
+        label = node.args[0] if node.args else None
+        if label:
+            pass
+
+    def visit_outE(self, node: ASTNode):
+        self.visit_out(node)
+
+    def visit_inV(self, node: ASTNode):
+        pass
+
+    def visit_outV(self, node: ASTNode):
+        pass
+
+    def visit_inE(self, node: ASTNode):
+        self.visit_in(node)
+
+    def visit_repeat(self, node: ASTNode):
+        if node.args and len(node.args) > 0:
+            self.repeat_traversal = node.args[0]
+            self.use_recursive_cte = True  # triggers ClickHouse-style expansion
+
+    def visit_times(self, node: ASTNode):
+        if node.args and len(node.args) > 0:
+            self.repeat_times = int(node.args[0])
+
+    def visit_emit(self, node: ASTNode):
+        self.repeat_emit = True
+
+    def visit_path(self, node: ASTNode):
+        self.collect_path = True
+
     def _get_vertex_label_from_context(self, node: ASTNode) -> str:
-        """Look ahead to find vertex label from has() step"""
         current = node.next_step
         while current:
+            if current.step_type == "hasLabel" and current.args:
+                return current.args[0]
             if current.step_type == "has" and len(current.args) == 3:
-                return current.args[0]  # Label is first arg
+                return current.args[0]
             current = current.next_step
         return "default"
 
     def _get_vertex_config(self, label: str) -> Optional[Dict[str, Any]]:
-        """Get vertex configuration from schema by label"""
         if "vertices" in self.graph_schema:
             for vertex in self.graph_schema["vertices"]:
                 if vertex["label"] == label:
@@ -409,7 +366,6 @@ class SQLGeneratorVisitor(GremlinVisitor):
         return None
 
     def _get_edge_config(self, label: str) -> Optional[Dict[str, Any]]:
-        """Get edge configuration from schema by label"""
         if "edges" in self.graph_schema:
             for edge in self.graph_schema["edges"]:
                 if edge["label"] == label:
@@ -417,65 +373,150 @@ class SQLGeneratorVisitor(GremlinVisitor):
         return None
 
     def _format_sql_value(self, value: Any) -> str:
-        """Format Python value for SQL"""
+        """Format Python value for ClickHouse SQL"""
         if isinstance(value, str):
-            return f"'{value}'"
+            # escape single quotes by doubling
+            v = value.replace("'", "''")
+            return f"'{v}'"
+        if value is None:
+            return "NULL"
         return str(value)
 
+    def _generate_clickhouse_recursive_sql(self) -> str:
+        """
+        Generate ClickHouse-compatible SQL for recursive-ish traversal patterns.
+
+        Strategy:
+          - Expand up to N hops with UNION ALL (depth 1..N).
+          - Use self-joins per hop.
+          - Optionally collect path as an Array(...) (works with [] literal).
+        """
+        base_filters = []
+        for where_clause in self.where_clauses:
+            base_filters.append(where_clause)
+
+        # Extract simple filters from repeat traversal (only has() predicates)
+        repeat_filters = []
+        if self.repeat_traversal:
+            repeat_node = self.repeat_traversal
+            while repeat_node:
+                if repeat_node.step_type == "has" and len(repeat_node.args) >= 2:
+                    key = (
+                        repeat_node.args[0]
+                        if len(repeat_node.args) == 2
+                        else repeat_node.args[1]
+                    )
+                    value_or_pred = repeat_node.args[-1]
+                    if isinstance(value_or_pred, Predicate):
+                        op = value_or_pred.to_sql_operator()
+                        val = self._format_sql_value(value_or_pred.value)
+                        repeat_filters.append(f"{key} {op} {val}")
+                    else:
+                        val = self._format_sql_value(value_or_pred)
+                        repeat_filters.append(f"{key} = {val}")
+                repeat_node = repeat_node.next_step
+
+        parts: List[str] = []
+        depth_limit = self.repeat_times or 3
+        id_field = self.current_vertex_id_field or "id"
+        table_name = self.current_table_name or (
+            self.tables[0].split(" AS ")[0] if self.tables else "vertices"
+        )
+
+        # Build UNION ALL chain for depths 1..N
+        for depth in range(1, depth_limit + 1):
+            if depth > 1:
+                parts.append("UNION ALL")
+
+            select_cols = f"t{depth-1}.*"
+            select_prefix = f"SELECT {depth} AS depth"
+
+            if self.collect_path:
+                if depth == 1:
+                    path_expr = f"[t0.{id_field}]"
+                else:
+                    path_items = ", ".join([f"t{i}.{id_field}" for i in range(depth)])
+                    path_expr = f"[{path_items}]"
+                select_prefix += f", {path_expr} AS path"
+
+            parts.append(f"{select_prefix}, {select_cols}")
+            parts.append(f"FROM {table_name} AS t0")
+
+            # base filters at depth 1 (rewrite alias if needed)
+            if depth == 1 and base_filters:
+                rewritten = [
+                    f.replace(self.current_table_alias or "v0", "t0")
+                    for f in base_filters
+                ]
+                parts.append(f"WHERE {' AND '.join(rewritten)}")
+
+            # add hops as self-joins on id_field
+            for hop in range(1, depth):
+                join_cond = [f"t{hop-1}.{id_field} = t{hop}.{id_field}"]
+                if repeat_filters:
+                    # apply repeat filters to the joined level
+                    join_cond.extend([f"t{hop}.{filt}" for filt in repeat_filters])
+                parts.append(
+                    f"INNER JOIN {table_name} AS t{hop} ON " + " AND ".join(join_cond)
+                )
+
+        # Wrap to allow ORDER/LIMIT
+        wrapped = "(\n" + "\n".join(parts) + "\n)"
+        final = [f"SELECT * FROM {wrapped}"]
+
+        if self.order_by_clauses:
+            final.append(f"ORDER BY {', '.join(self.order_by_clauses)}")
+        else:
+            final.append("ORDER BY depth")
+
+        if self.limit_value is not None:
+            # ClickHouse supports simple LIMIT N
+            final.append(f"LIMIT {self.limit_value}")
+
+        return "\n".join(final)
+
     def generate_sql(self) -> str:
-        """Generate final SQL query with support for aggregations"""
+        """Generate final SQL query; uses ClickHouse path for repeat()/times()."""
+        # If repeat()/times() pattern was used, switch to ClickHouse expansion
+        if self.use_recursive_cte:
+            return self._generate_clickhouse_recursive_sql()
 
-        # Build SELECT clause
+        # SELECT clause
         if self.has_aggregation:
-            # Build SELECT with group by fields and aggregations
             select_items = []
-
-            # Add group by fields with aliases
             for field in self.group_by_fields:
-                field_name = field.split(".")[-1]  # Extract field name
+                field_name = field.split(".")[-1]
                 select_items.append(f"{field} AS {field_name}")
-
-            # Add aggregations
             for agg in self.aggregations:
                 if agg["type"] == "COUNT":
-                    select_items.append(
-                        f"COUNT({agg['field']}) AS {agg['alias']}"
-                    )
+                    select_items.append(f"COUNT({agg['field']}) AS {agg['alias']}")
                 elif agg["type"] == "SUM":
-                    select_items.append(
-                        f"SUM({agg['field']}) AS {agg['alias']}"
-                    )
-
+                    select_items.append(f"SUM({agg['field']}) AS {agg['alias']}")
             select_clause = f"SELECT {', '.join(select_items)}"
         else:
             select_clause = f"SELECT {', '.join(self.select_columns)}"
 
+        # FROM + JOINs
         from_clause = f"FROM {self.tables[0]}"
         sql_parts = [select_clause, from_clause]
-
-        # Add JOINs
         if self.joins:
             sql_parts.extend(self.joins)
 
-        # Add WHERE clause
+        # WHERE
         if self.where_clauses:
-            where_clause = f"WHERE {' AND '.join(self.where_clauses)}"
-            sql_parts.append(where_clause)
+            sql_parts.append(f"WHERE {' AND '.join(self.where_clauses)}")
 
-        # Add GROUP BY clause
+        # GROUP BY
         if self.group_by_fields:
-            group_by_clause = f"GROUP BY {', '.join(self.group_by_fields)}"
-            sql_parts.append(group_by_clause)
+            sql_parts.append(f"GROUP BY {', '.join(self.group_by_fields)}")
 
-        # Add ORDER BY clause
+        # ORDER BY
         if self.order_by_clauses:
-            order_by_clause = f"ORDER BY {', '.join(self.order_by_clauses)}"
-            sql_parts.append(order_by_clause)
+            sql_parts.append(f"ORDER BY {', '.join(self.order_by_clauses)}")
 
-        # Add LIMIT clause
+        # LIMIT
         if self.limit_value is not None:
-            limit_clause = f"LIMIT {self.limit_value}"
-            sql_parts.append(limit_clause)
+            sql_parts.append(f"LIMIT {self.limit_value}")
 
         return "\n".join(sql_parts)
 
@@ -493,16 +534,13 @@ class QueryAnalyzerVisitor(GremlinVisitor):
         self.estimated_selectivity = 1.0
 
     def visit(self, node: ASTNode):
-        """Analyze each step"""
         if node is None:
             return
 
         if node.step_type == "has":
             self.vertex_filters.append(node.args)
-            # Predicates typically reduce data by ~90%
             if len(node.args) == 3 and isinstance(node.args[2], Predicate):
                 self.estimated_selectivity *= 0.1
-
         elif node.step_type in ["out", "in"]:
             self.edge_traversals.append(node.args[0])
 
@@ -510,7 +548,6 @@ class QueryAnalyzerVisitor(GremlinVisitor):
             self.visit(node.next_step)
 
     def get_analysis(self) -> Dict[str, Any]:
-        """Return analysis results"""
         return {
             "num_filters": len(self.vertex_filters),
             "num_traversals": len(self.edge_traversals),
@@ -519,7 +556,6 @@ class QueryAnalyzerVisitor(GremlinVisitor):
         }
 
     def _get_recommendation(self) -> str:
-        """Provide optimization recommendations"""
         if self.estimated_selectivity < 0.01:
             return "Highly selective query - good for SQL push-down"
         if self.estimated_selectivity < 0.5:
