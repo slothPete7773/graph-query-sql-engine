@@ -129,6 +129,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
         self.table_counter = 0
         self.current_table_alias = None
         self.current_vertex_id_field = None  # Track current vertex ID field
+        self.current_table_name = None  # Track current table name
 
     def visit(self, node: ASTNode):
         """Main visit method that dispatches to specific handlers"""
@@ -166,6 +167,7 @@ class SQLGeneratorVisitor(GremlinVisitor):
         self.tables.append(f"{table_name} AS {alias}")
         self.current_table_alias = alias
         self.current_vertex_id_field = id_field  # Track the ID field
+        self.current_table_name = table_name  # Track the table name
 
         # If specific IDs provided
         if node.args and node.args[0]:
@@ -226,7 +228,9 @@ class SQLGeneratorVisitor(GremlinVisitor):
             if target_vertex_config:
                 target_table_source = target_vertex_config["oneToOne"]["tableSource"]
                 target_table = f"{target_table_source['catalog']}.{target_table_source['schema']}.{target_table_source['table']}"
-                target_id_field = target_vertex_config["oneToOne"]["id"]["fields"][0]["field"]
+                target_id_field = target_vertex_config["oneToOne"]["id"]["fields"][0][
+                    "field"
+                ]
             else:
                 target_table = "vertices"
                 target_id_field = "id"
@@ -238,27 +242,36 @@ class SQLGeneratorVisitor(GremlinVisitor):
             target_table = "vertices"
             target_id_field = "id"
 
-        # Create aliases
-        edge_alias = f"e{self.table_counter}"
-        self.table_counter += 1
-        vertex_alias = f"v{self.table_counter}"
-        self.table_counter += 1
+        # Check if all tables are the same (source, edge, target)
+        # If so, avoid self-joins and just continue using the same alias
+        if self.current_table_name == edge_table == target_table:
+            # Same table - no join needed, just continue with same alias
+            # The traversal is just filtering on the same table
+            self.current_vertex_id_field = target_id_field
+            # Don't update current_table_alias - keep using the same one
+        else:
+            # Different tables - need actual joins
+            edge_alias = f"e{self.table_counter}"
+            self.table_counter += 1
+            vertex_alias = f"v{self.table_counter}"
+            self.table_counter += 1
 
-        # Join edge table - use current vertex ID field instead of hardcoded "id"
-        source_id_field = self.current_vertex_id_field or "id"
-        self.joins.append(
-            f"INNER JOIN {edge_table} AS {edge_alias} "
-            f"ON {self.current_table_alias}.{source_id_field} = {edge_alias}.{from_id_field}"
-        )
+            # Join edge table - use current vertex ID field instead of hardcoded "id"
+            source_id_field = self.current_vertex_id_field or "id"
+            self.joins.append(
+                f"INNER JOIN {edge_table} AS {edge_alias} "
+                f"ON {self.current_table_alias}.{source_id_field} = {edge_alias}.{from_id_field}"
+            )
 
-        # Join target vertex table
-        self.joins.append(
-            f"INNER JOIN {target_table} AS {vertex_alias} "
-            f"ON {edge_alias}.{to_id_field} = {vertex_alias}.{target_id_field}"
-        )
+            # Join target vertex table
+            self.joins.append(
+                f"INNER JOIN {target_table} AS {vertex_alias} "
+                f"ON {edge_alias}.{to_id_field} = {vertex_alias}.{target_id_field}"
+            )
 
-        self.current_table_alias = vertex_alias
-        self.current_vertex_id_field = target_id_field  # Update to target vertex ID field
+            self.current_table_alias = vertex_alias
+            self.current_vertex_id_field = target_id_field
+            self.current_table_name = target_table
 
     def visit_in(self, node: ASTNode):
         """Handle in() - traverse incoming edges"""
@@ -281,7 +294,9 @@ class SQLGeneratorVisitor(GremlinVisitor):
             if source_vertex_config:
                 source_table_source = source_vertex_config["oneToOne"]["tableSource"]
                 source_table = f"{source_table_source['catalog']}.{source_table_source['schema']}.{source_table_source['table']}"
-                source_id_field = source_vertex_config["oneToOne"]["id"]["fields"][0]["field"]
+                source_id_field = source_vertex_config["oneToOne"]["id"]["fields"][0][
+                    "field"
+                ]
             else:
                 source_table = "vertices"
                 source_id_field = "id"
@@ -293,25 +308,35 @@ class SQLGeneratorVisitor(GremlinVisitor):
             source_table = "vertices"
             source_id_field = "id"
 
-        edge_alias = f"e{self.table_counter}"
-        self.table_counter += 1
-        vertex_alias = f"v{self.table_counter}"
-        self.table_counter += 1
+        # Check if all tables are the same (current, edge, source)
+        # If so, avoid self-joins and just continue using the same alias
+        if self.current_table_name == edge_table == source_table:
+            # Same table - no join needed, just continue with same alias
+            # The traversal is just filtering on the same table
+            self.current_vertex_id_field = source_id_field
+            # Don't update current_table_alias - keep using the same one
+        else:
+            # Different tables - need actual joins
+            edge_alias = f"e{self.table_counter}"
+            self.table_counter += 1
+            vertex_alias = f"v{self.table_counter}"
+            self.table_counter += 1
 
-        # Join edge table - use current vertex ID field instead of hardcoded "id"
-        current_id_field = self.current_vertex_id_field or "id"
-        self.joins.append(
-            f"INNER JOIN {edge_table} AS {edge_alias} "
-            f"ON {self.current_table_alias}.{current_id_field} = {edge_alias}.{to_id_field}"
-        )
+            # Join edge table - use current vertex ID field instead of hardcoded "id"
+            current_id_field = self.current_vertex_id_field or "id"
+            self.joins.append(
+                f"INNER JOIN {edge_table} AS {edge_alias} "
+                f"ON {self.current_table_alias}.{current_id_field} = {edge_alias}.{to_id_field}"
+            )
 
-        self.joins.append(
-            f"INNER JOIN {source_table} AS {vertex_alias} "
-            f"ON {edge_alias}.{from_id_field} = {vertex_alias}.{source_id_field}"
-        )
+            self.joins.append(
+                f"INNER JOIN {source_table} AS {vertex_alias} "
+                f"ON {edge_alias}.{from_id_field} = {vertex_alias}.{source_id_field}"
+            )
 
-        self.current_table_alias = vertex_alias
-        self.current_vertex_id_field = source_id_field  # Update to source vertex ID field
+            self.current_table_alias = vertex_alias
+            self.current_vertex_id_field = source_id_field
+            self.current_table_name = source_table
 
     def visit_values(self, node: ASTNode):
         """Handle values() - select specific properties"""
@@ -437,14 +462,14 @@ def demo_hybrid_approach():
                     "tableSource": {
                         "catalog": "redberry",
                         "schema": "redberry",
-                        "table": "fact_cdr"
+                        "table": "fact_cdr",
                     },
                     "id": {
                         "fields": [
                             {
                                 "type": "UInt64",
                                 "field": "a_subscriber_id",
-                                "alias": "puppy_id_a_subscriber_id"
+                                "alias": "puppy_id_a_subscriber_id",
                             }
                         ]
                     },
@@ -452,20 +477,12 @@ def demo_hybrid_approach():
                         {
                             "type": "UInt64",
                             "field": "a_subscriber_id",
-                            "alias": "a_subscriber_id"
+                            "alias": "a_subscriber_id",
                         },
-                        {
-                            "type": "String",
-                            "field": "a_number",
-                            "alias": "a_number"
-                        },
-                        {
-                            "type": "String",
-                            "field": "operator",
-                            "alias": "operator"
-                        }
-                    ]
-                }
+                        {"type": "String", "field": "a_number", "alias": "a_number"},
+                        {"type": "String", "field": "operator", "alias": "operator"},
+                    ],
+                },
             },
             {
                 "label": "call_event",
@@ -473,56 +490,40 @@ def demo_hybrid_approach():
                     "tableSource": {
                         "catalog": "redberry",
                         "schema": "redberry",
-                        "table": "fact_cdr"
+                        "table": "fact_cdr",
                     },
                     "id": {
                         "fields": [
                             {
                                 "type": "UInt64",
                                 "field": "event_id",
-                                "alias": "puppy_id_event_id"
+                                "alias": "puppy_id_event_id",
                             }
                         ]
                     },
                     "attributes": [
-                        {
-                            "type": "UInt64",
-                            "field": "event_id",
-                            "alias": "event_id"
-                        },
+                        {"type": "UInt64", "field": "event_id", "alias": "event_id"},
                         {
                             "type": "String",
                             "field": "event_type",
-                            "alias": "event_type"
+                            "alias": "event_type",
                         },
                         {
                             "type": "DateTime",
                             "field": "event_datetime",
-                            "alias": "event_datetime"
+                            "alias": "event_datetime",
                         },
                         {
                             "type": "Int32",
                             "field": "duration_seconds",
-                            "alias": "duration_seconds"
+                            "alias": "duration_seconds",
                         },
-                        {
-                            "type": "String",
-                            "field": "b_number",
-                            "alias": "b_number"
-                        },
-                        {
-                            "type": "Float64",
-                            "field": "latitude",
-                            "alias": "latitude"
-                        },
-                        {
-                            "type": "Float64",
-                            "field": "longitude",
-                            "alias": "longitude"
-                        }
-                    ]
-                }
-            }
+                        {"type": "String", "field": "b_number", "alias": "b_number"},
+                        {"type": "Float64", "field": "latitude", "alias": "latitude"},
+                        {"type": "Float64", "field": "longitude", "alias": "longitude"},
+                    ],
+                },
+            },
         ],
         "edges": [
             {
@@ -532,14 +533,14 @@ def demo_hybrid_approach():
                 "tableSource": {
                     "catalog": "redberry",
                     "schema": "redberry",
-                    "table": "fact_cdr"
+                    "table": "fact_cdr",
                 },
                 "id": {
                     "fields": [
                         {
                             "type": "UInt64",
                             "field": "event_id",
-                            "alias": "puppy_id_event_id"
+                            "alias": "puppy_id_event_id",
                         }
                     ]
                 },
@@ -548,7 +549,7 @@ def demo_hybrid_approach():
                         {
                             "type": "UInt64",
                             "field": "a_subscriber_id",
-                            "alias": "puppy_from_a_subscriber_id"
+                            "alias": "puppy_from_a_subscriber_id",
                         }
                     ]
                 },
@@ -557,24 +558,20 @@ def demo_hybrid_approach():
                         {
                             "type": "UInt64",
                             "field": "event_id",
-                            "alias": "puppy_to_event_id"
+                            "alias": "puppy_to_event_id",
                         }
                     ]
                 },
                 "attributes": [
-                    {
-                        "type": "String",
-                        "field": "call_type",
-                        "alias": "call_type"
-                    },
+                    {"type": "String", "field": "call_type", "alias": "call_type"},
                     {
                         "type": "DateTime",
                         "field": "event_datetime",
-                        "alias": "event_datetime"
-                    }
-                ]
+                        "alias": "event_datetime",
+                    },
+                ],
             }
-        ]
+        ],
     }
 
     print("=" * 80)
